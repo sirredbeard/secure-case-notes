@@ -1,5 +1,7 @@
 # Secure Case Notes v0.0.1
 
+<img width="1047" height="564" alt="1" src="https://github.com/user-attachments/assets/c9454edf-deff-4692-a8f6-82660c1ebadd" />
+
 **HIPAA-Compliant AI-Assisted Mental Health Case Note Documentation**
 
 A cross-platform desktop application that uses local AI models to transcribe therapy sessions and generate structured clinical case notes, with complete HIPAA compliance through in-memory-only processing.
