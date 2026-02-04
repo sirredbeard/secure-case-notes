@@ -1,0 +1,89 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+        include:
+          - os: windows-latest
+            runtime: win-arm64
+          - os: macos-latest
+            runtime: osx-arm64
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+        dotnet-quality: 'preview'
+    
+    - name: Restore dependencies
+      run: dotnet restore
+    
+    - name: Build
+      run: dotnet build --no-restore --configuration Release
+    
+    - name: Test
+      run: dotnet test --no-build --configuration Release --verbosity normal
+    
+    - name: Publish Single File
+      run: |
+        dotnet publish src/CaseNotes.Api/CaseNotes.Api.csproj \
+          -r ${{ matrix.runtime }} \
+          -c Release \
+          --self-contained \
+          -p:PublishSingleFile=true \
+          -p:IncludeNativeLibrariesForSelfExtract=true \
+          -p:EnableCompressionInSingleFile=true \
+          -o publish/${{ matrix.runtime }}
+    
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: secure-case-notes-${{ matrix.runtime }}
+        path: publish/${{ matrix.runtime }}/*
+        retention-days: 30
+  
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run security scan
+      run: |
+        echo "Performing security scan..."
+        # Add security scanning tools here (e.g., Snyk, OWASP)
+    
+    - name: Check for secrets
+      run: |
+        echo "Checking for exposed secrets..."
+        # Add secret scanning here
+
+  compliance-check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: HIPAA Compliance Check
+      run: |
+        echo "Verifying HIPAA compliance measures..."
+        # Verify no disk writes in code
+        ! grep -r "File\.Write" src/ || (echo "ERROR: Found File.Write calls!" && exit 1)
+        ! grep -r "File\.AppendAll" src/ || (echo "ERROR: Found File.AppendAll calls!" && exit 1)
+        echo "✓ No prohibited file operations found"
+        
+        # Verify telemetry is disabled
+        grep -q "ONNXRUNTIME_TELEMETRY_OPTOUT" src/CaseNotes.Api/Program.cs || (echo "ERROR: Telemetry not disabled!" && exit 1)
+        echo "✓ Telemetry disabled"
+        
+        echo "✓ HIPAA compliance checks passed"

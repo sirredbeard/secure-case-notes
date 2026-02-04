@@ -1,0 +1,25 @@
+## Build outputs
+bin/
+obj/
+publish/
+release/
+*.user
+*.suo
+*.cache
+
+## Models (never commit these)
+models/
+*.onnx
+*.tar.bz2
+
+## Visual Studio
+.vs/
+.vscode/
+
+## Logs
+logs/
+*.log
+
+## OS
+.DS_Store
+Thumbs.db

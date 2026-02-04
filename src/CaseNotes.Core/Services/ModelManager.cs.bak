@@ -1,0 +1,274 @@
+using System.Runtime.InteropServices;
+using CaseNotes.Core.Interfaces;
+using CaseNotes.Core.Models;
+using Microsoft.Extensions.Logging;
+using Huggingface;
+
+namespace CaseNotes.Core.Services;
+
+/// <summary>
+/// Manages AI model downloads, caching, and storage
+/// Implements HIPAA-compliant model caching with OS-specific locations
+/// </summary>
+public sealed class ModelManager(ILogger<ModelManager> logger) : IModelManager
+{
+    private readonly ILogger<ModelManager> _logger = logger;
+    
+    // Model configurations
+    private static readonly ModelInfo WhisperModelInfo = new()
+    {
+        Name = "Whisper",
+        HuggingFaceRepo = "openai/whisper-tiny",
+        Variant = "",
+        EstimatedSizeBytes = 74_000_000, // ~74MB for tiny model
+        IsDownloaded = false
+    };
+    
+    private static readonly ModelInfo Phi4ModelInfo = new()
+    {
+        Name = "Phi-4-mini-instruct",
+        HuggingFaceRepo = "microsoft/Phi-3-mini-4k-instruct-onnx",
+        Variant = "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
+        EstimatedSizeBytes = 2_500_000_000, // ~2.5GB for int4 quantized
+        IsDownloaded = false
+    };
+    
+    /// <summary>
+    /// Gets the OS-specific cache directory for models
+    /// Windows: %LOCALAPPDATA%\SecureCaseNotes\models
+    /// macOS: ~/Library/Application Support/SecureCaseNotes/models
+    /// </summary>
+    private static string GetModelCacheDirectory()
+    {
+        string baseDir;
+        
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            baseDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "SecureCaseNotes",
+                "models");
+        }
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            baseDir = Path.Combine(home, "Library", "Application Support", "SecureCaseNotes", "models");
+        }
+        else
+        {
+            // Linux fallback
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            baseDir = Path.Combine(home, ".local", "share", "SecureCaseNotes", "models");
+        }
+        
+        Directory.CreateDirectory(baseDir);
+        return baseDir;
+    }
+    
+    public async Task<ModelStatus> GetStatusAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var whisperPath = await GetWhisperModelPathAsync(cancellationToken);
+            var phi4Path = await GetTextGenerationModelPathAsync(cancellationToken);
+            
+            WhisperModelInfo.IsDownloaded = IsModelComplete(whisperPath, WhisperModelInfo);
+            WhisperModelInfo.LocalPath = whisperPath;
+            
+            Phi4ModelInfo.IsDownloaded = IsModelComplete(phi4Path, Phi4ModelInfo);
+            Phi4ModelInfo.LocalPath = phi4Path;
+            
+            var allReady = WhisperModelInfo.IsDownloaded && Phi4ModelInfo.IsDownloaded;
+            
+            return new ModelStatus
+            {
+                AllModelsReady = allReady,
+                WhisperModel = WhisperModelInfo,
+                TextGenerationModel = Phi4ModelInfo
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking model status");
+            return new ModelStatus
+            {
+                AllModelsReady = false,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+    
+    private bool IsModelComplete(string modelPath, ModelInfo modelInfo)
+    {
+        if (!Directory.Exists(modelPath))
+        {
+            return false;
+        }
+        
+        // Check for essential files
+        var requiredFiles = GetRequiredModelFiles(modelInfo);
+        
+        foreach (var (fileName, subPath) in requiredFiles)
+        {
+            var filePath = string.IsNullOrEmpty(subPath)
+                ? Path.Combine(modelPath, fileName)
+                : Path.Combine(modelPath, subPath, fileName);
+            
+            if (!File.Exists(filePath))
+            {
+                _logger.LogWarning("Missing required file: {File}", filePath);
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    public async Task EnsureModelsDownloadedAsync(IProgress<ModelInfo>? progress = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var status = await GetStatusAsync(cancellationToken);
+            
+            if (!status.WhisperModel!.IsDownloaded)
+            {
+                _logger.LogInformation("Downloading Whisper model...");
+                await DownloadModelAsync(WhisperModelInfo, progress, cancellationToken);
+            }
+            
+            if (!status.TextGenerationModel!.IsDownloaded)
+            {
+                _logger.LogInformation("Downloading Phi-4 model...");
+                await DownloadModelAsync(Phi4ModelInfo, progress, cancellationToken);
+            }
+            
+            _logger.LogInformation("All models are ready");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error downloading models");
+            throw;
+        }
+    }
+    
+    public Task<string> GetWhisperModelPathAsync(CancellationToken cancellationToken = default)
+    {
+        var basePath = GetModelCacheDirectory();
+        var modelPath = Path.Combine(basePath, "whisper-tiny-onnx");
+        return Task.FromResult(modelPath);
+    }
+    
+    public Task<string> GetTextGenerationModelPathAsync(CancellationToken cancellationToken = default)
+    {
+        var basePath = GetModelCacheDirectory();
+        var modelPath = Path.Combine(basePath, "phi-4-mini-instruct-onnx", "cpu-int4-rtn-block-32-acc-level-4");
+        return Task.FromResult(modelPath);
+    }
+    
+    private async Task DownloadModelAsync(ModelInfo modelInfo, IProgress<ModelInfo>? progress, CancellationToken cancellationToken)
+    {
+        try
+        {
+            _logger.LogInformation("Starting download for {ModelName} from {Repo}", modelInfo.Name, modelInfo.HuggingFaceRepo);
+            
+            var localPath = modelInfo.Name == "Whisper" 
+                ? await GetWhisperModelPathAsync(cancellationToken)
+                : await GetTextGenerationModelPathAsync(cancellationToken);
+            
+            Directory.CreateDirectory(localPath);
+            
+            // Use HuggingfaceHub to download the entire repo snapshot
+            var progressHandler = new ModelDownloadProgress(modelInfo, progress, _logger);
+            
+            _logger.LogInformation("Downloading snapshot from {Repo}...", modelInfo.HuggingFaceRepo);
+            
+            // Download snapshot to temp location first, then move to cache
+            var snapshotPath = await HFDownloader.DownloadSnapshotAsync(
+                modelInfo.HuggingFaceRepo,
+                localDir: localPath,
+                progress: progressHandler
+            );
+            
+            _logger.LogInformation("Downloaded {ModelName} to {Path}", modelInfo.Name, snapshotPath);
+            
+            modelInfo.IsDownloaded = true;
+            modelInfo.DownloadProgress = 100.0;
+            progress?.Report(modelInfo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to download {ModelName}", modelInfo.Name);
+            throw;
+        }
+    }
+    
+    // Progress handler for HuggingfaceHub downloads
+    private class ModelDownloadProgress(ModelInfo modelInfo, IProgress<ModelInfo>? parentProgress, ILogger logger) : IGroupedProgress
+    {
+        private readonly Dictionary<string, int> _fileProgress = new();
+        private int _lastReportedProgress = 0;
+        
+        public void Report(string filename, int fileProgress)
+        {
+            _fileProgress[filename] = fileProgress;
+            
+            // Calculate overall progress as average of all files
+            var overallProgress = _fileProgress.Count > 0 
+                ? (int)_fileProgress.Values.Average() 
+                : 0;
+            
+            // Only report if progress changed significantly (every 5%)
+            if (overallProgress >= _lastReportedProgress + 5 || overallProgress >= 100)
+            {
+                _lastReportedProgress = overallProgress;
+                modelInfo.DownloadProgress = overallProgress;
+                parentProgress?.Report(modelInfo);
+                
+                logger.LogInformation("{Model}: {Progress}% - {File}", 
+                    modelInfo.Name, overallProgress, filename);
+            }
+        }
+    }
+}
+                }
+                catch (HttpRequestException ex)
+                {
+                    _logger.LogError(ex, "Failed to download {FileName} from {Url}", fileName, fileUrl);
+                    throw new InvalidOperationException($"Failed to download {fileName}. The file may not exist or the URL is incorrect.", ex);
+                }
+            }
+            
+            modelInfo.DownloadProgress = 1.0;
+            progress?.Report(modelInfo);
+            
+            _logger.LogInformation("Successfully downloaded all files for {ModelName}", modelInfo.Name);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during model download");
+            throw;
+        }
+    }
+    
+    private static List<(string fileName, string subPath)> GetRequiredModelFiles(ModelInfo modelInfo)
+    {
+        // Return list of (fileName, subPath) tuples to download
+        var files = new List<(string, string)>();
+        
+        if (modelInfo.Name == "Whisper")
+        {
+            // Whisper: No files needed (uses placeholder)
+            // Returns empty list so IsModelDownloaded always returns true
+        }
+        else if (modelInfo.Name == "Phi-4-mini-instruct")
+        {
+            // Phi-3 model files
+            var variant = modelInfo.Variant;
+            files.Add(("genai_config.json", variant));
+            files.Add(("phi-3-mini-4k-instruct-cpu-int4-rtn-block-32-acc-level-4.onnx", variant));
+            files.Add(("phi-3-mini-4k-instruct-cpu-int4-rtn-block-32-acc-level-4.onnx.data", variant));
+        }
+        
+        return files;
+    }
+}

@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CaseNotes.Api/CaseNotes.Api.csproj" />
+    <Project Path="src/CaseNotes.Core/CaseNotes.Core.csproj" />
+    <Project Path="src/CaseNotes.Ui/CaseNotes.Ui.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CaseNotes.Tests/CaseNotes.Tests.csproj" />
+  </Folder>
+</Solution>
